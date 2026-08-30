@@ -15,6 +15,8 @@ the hex flags were never decoded.
 
 **This repository decodes them**, from the firmware itself.
 
+<img width="776" height="1064" alt="image" src="https://github.com/user-attachments/assets/c1c47128-a97d-4e48-a8cb-bc1040b0699d" />
+
 ## What is here
 
 | | |
