@@ -3,9 +3,9 @@
 Four policy types, four different layouts. Fields are space-separated; the last
 one is always a hex flag word.
 
-Field names come from two sources: the GUI's JavaScript, which reads and writes
-specific indices, and debug format strings compiled into `bsd` itself that name
-every field in order.
+Field names come from `bsd -H`, which prints the vendor's own layout, and are
+confirmed against `bsd -i`, which shows the parsed values live. See
+`09-diagnostics.md`.
 
 ---
 
@@ -13,25 +13,36 @@ every field in order.
 
 *When should steering be considered at all?*
 
-    <bandwidth_util%> <?> <?> <RSSI> <PHY_low> <PHY_high> <flags>
-           0           1   2     3        4         5        6
+`bsd -H` gives the layout:
 
-| # | field | GUI control |
+    <bw util percentage> <sample period> <consecutive sample count>
+    <rssi threshold> <phy rate threshold> <extension flag>
+
+The "phy rate threshold" is two fields in practice — high and low — matching
+the separate `PHYRATE_HIGH` and `PHYRATE_LOW` flags. `bsd -i` prints the parsed
+struct and resolves the ambiguity:
+
+    max=0 period=5 cnt=3 rssi=-62 phyrate_high=0 phyrate_low=0 flags=0x62 state=3
+
+So the nvram layout is:
+
+| # | field | meaning |
 |---|---|---|
-| 0 | bandwidth utilisation %, 0–100 | yes |
-| 1 | unknown, always `5` on stock | none |
-| 2 | unknown, always `3` on stock | none |
-| 3 | RSSI threshold, dBm | yes |
-| 4 | PHY rate "less than", Mbps | yes |
-| 5 | PHY rate "greater than", Mbps | yes |
-| 6 | flags, hex | yes |
+| 0 | bandwidth utilisation % | reported as `max` |
+| 1 | **sample period** | hysteresis window |
+| 2 | **consecutive sample count** | breaches needed before acting |
+| 3 | RSSI threshold, dBm | |
+| 4 | PHY rate threshold (high) | |
+| 5 | PHY rate threshold (low) | |
+| 6 | flags, hex | |
 
-Fields 1 and 2 are preserved by read-modify-write when the GUI saves, so they
-survive edits even though nothing exposes them. A related debug string reads
-`bsd_trigger_policy min=%d max=%d rssi=%d flags=0x%x`, which suggests fields 1
-and 2 are a min/max pair, but that is inference rather than confirmation.
+Fields 1 and 2 have no GUI control and are preserved by read-modify-write when
+the GUI saves. They are a **hysteresis**: N consecutive samples must breach the
+condition within the period before the daemon acts, which is what stops a
+single bad sample from triggering a steer.
 
-Example: `0 5 3 -62 0 0 0x62`
+Example: `0 5 3 -62 0 0 0x62` — five-sample period, three consecutive
+breaches required.
 
 ---
 
@@ -39,26 +50,36 @@ Example: `0 5 3 -62 0 0 0x62`
 
 *Once steering is triggered, which client gets moved?*
 
-A debug format string in the binary names the whole struct:
+From `bsd -H`:
 
-    idle_rate rssi phyrate_low phyrate_high wprio wrssi wphy_rate
-    wtx_failures wtx_rate wrx_rate flags
+    <idle_rate> <rssi> <phy rate> <wprio> <wrssi> <wphy_rate>
+    <wtx_failures> <wtx_rate> <wrx_rate> <extension_flag>
 
-    <idle_rate> <RSSI> <PHY_low> <PHY_high> <wprio> <wrssi> <wphy_rate>
-         0         1       2          3         4       5        6
-    <wtx_failures> <wtx_rate> <wrx_rate> <flags>
-          7             8          9        10
+and from `bsd -i`, with "phy rate" again split in two:
 
-The GUI only touches 1, 2, 3 and 10.
+    idle_rate=30 rssi=-62 phyrate_high=0 phyrate_low=0 wprio=0 wrssi=1
+    wphy_rate=1 wtx_failures=0 wtx_rate=0 wrx_rate=0 flags=0x162
 
-Fields 4–9 are a **weight vector**. `bsd` scores candidate stations against
-each other, and these weight the contribution of priority, RSSI, PHY rate, TX
-failures, TX rate and RX rate. On stock firmware they are `0 1 1 0 0 0` — equal
-weight on RSSI and PHY rate, everything else ignored.
+| # | field |
+|---|---|
+| 0 | `idle_rate` |
+| 1 | RSSI threshold |
+| 2 | PHY rate high |
+| 3 | PHY rate low |
+| 4 | `wprio` |
+| 5 | `wrssi` |
+| 6 | `wphy_rate` |
+| 7 | `wtx_failures` |
+| 8 | `wtx_rate` |
+| 9 | `wrx_rate` |
+| 10 | flags |
 
-Field 0, `idle_rate`, is `30` on every radio on stock firmware.
+Fields 4–9 are a **weight vector**. The daemon scores candidate stations
+against each other, and these weight the contribution of priority, RSSI, PHY
+rate, TX failures, TX rate and RX rate. Stock firmware uses `0 1 1 0 0 0` —
+equal weight on RSSI and PHY rate, everything else ignored.
 
-Example: `30 -62 0 0 0 1 1 0 0 0 0x162`
+The GUI only exposes fields 1, 2, 3 and 10.
 
 ---
 
@@ -68,35 +89,40 @@ Example: `30 -62 0 0 0 1 1 0 0 0 0x162`
 
     <first target ifname> <second target ifname>
 
-Interface names, not indices — `eth6 eth7` and so on. The second is the
-fallback if the first does not qualify. In 5 GHz-only mode this may hold a
-single entry.
+Interface names, not indices. The second is the fallback if the first does not
+qualify. In 5 GHz-only mode this may hold a single entry.
 
 **This is the highest-leverage setting in the whole system**, and the least
-obvious. It determines which radio receives clients, and stock defaults are not
-necessarily right for your RF environment. See `06-behaviour.md`.
-
-Example: `eth7 eth8`
+obvious — it decides which radio receives clients, and the stock default is
+chosen without any knowledge of your RF environment. See `06-behaviour.md`.
 
 ---
 
-## `bsd_if_qualify_policy` — 3 fields
+## `bsd_if_qualify_policy` — 3 fields, of which the vendor documents 2
 
 *Is a candidate target radio acceptable right now?*
 
-Confirmed by the debug string `bsd_if_qualify_policy min_bw[%d] flags[0x%x]
-rssi[%d]`:
+`bsd -H` documents only:
 
-    <min bandwidth %> <flags> <RSSI>
-            0             1      2
+    <bw util percentage> <extension_flag>
 
-**Field 2 has no GUI control at all.** It is preserved on save but never
-exposed — an RSSI qualifier that stock firmware sets to `-100`, i.e. effectively
-disabled. It is reachable by nvram if you want it.
+But the stored value has **three** fields, and `bsd -i` prints all three:
 
-Note this policy's flag enum differs from the others: see `04-flag-bits.md`.
+    min_bw=0 rssi=-100 flags=0x0
 
-Example: `0 0x4 -100`
+So the layout is:
+
+| # | field | documented |
+|---|---|---|
+| 0 | minimum bandwidth % | yes |
+| 1 | flags | yes |
+| 2 | RSSI qualifier | **no** |
+
+Field 2 has no GUI control and no mention in the vendor's own help, yet the
+daemon parses and reports it. Stock value is `-100`, i.e. effectively disabled.
+It is reachable by nvram.
+
+Note this policy uses a **different flag enum** — see `04-flag-bits.md`.
 
 ---
 
@@ -104,4 +130,21 @@ Example: `0 0x4 -100`
 
     <window seconds> <count> <dwell seconds>
 
-Stock: `60 2 180`.
+Stock: `60 2 180` — two steers per 60-second window, then that station is left
+alone for 180 seconds.
+
+---
+
+## Global tunables
+
+`bsd -i` exposes a set of daemon-wide values, most with no GUI control:
+
+    status_poll: 5        idle_rate: 10         prefer_5g: 1
+    steer_timeout: 15     sta_timeout: 120      maclist_timeout: 3
+    probe_timeout: 3600   probe_gap: 30         poll_interval: 1
+    slowest_at_ratio: 40  phyrate_delta: 200    scheme: 2[3]
+
+Corresponding nvram names appear in the binary (`bsd_prefer_5g`,
+`bsd_steer_timeout`, `bsd_phyrate_delta` and so on) and are unset on stock
+firmware, meaning the daemon is using compiled-in defaults. Setting them is
+untested.

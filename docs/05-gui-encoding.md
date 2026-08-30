@@ -34,8 +34,16 @@ VHT is encoded as a bit pair:
 
     (0,0) = All        (0,1) = "AC only"        (1,0) = "not-allowed"
 
-The GUI's own source comments label these `//all`, `//ac only` and `//legacy`.
-**These labels contradict the flag names in the binary** — see
+The GUI's own source comments label these `//all`, `//ac only` and `//legacy`,
+and **the GUI is correct**.
+
+Bit 2 is `VHT` and bit 3 is `NON_VHT`, but both are *exclusions*: setting
+`NON_VHT` excludes non-802.11ac stations, leaving only AC — which is what "AC
+only" means. `bsd -i` confirms it, printing `NON VHT: Not-Allowed` for a policy
+with bit 3 set.
+
+An earlier revision of this repository claimed the labels were inverted. They
+are not; the flag names had been read as selectors rather than exclusions. See
 `08-open-questions.md`.
 
 ## Read-modify-write preserves unknown fields

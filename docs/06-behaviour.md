@@ -64,14 +64,17 @@ touch anything else.
 
 ### A third mode nobody exposes
 
-`BSD_STEERING_POLICY_FLAG_STA_NUM_BAL` (bit 7) sits immediately after
-`LOAD_BAL` in the enum and balances by **client count** rather than airtime
-utilisation. There is no GUI control for it.
+`BSD_STEERING_POLICY_FLAG_STA_NUM_BAL` (bit 7, confirmed by `bsd -H`) sits
+immediately after `LOAD_BAL` and balances by **client count** rather than
+airtime utilisation. There is no GUI control for it, but `bsd -i` reports it —
+`LOAD BALANCE` and `STA NUM BALANCE` print as two independent lines, so they
+are complementary flags rather than two settings of one field.
 
 On a network with a handful of clients, count-balancing is arguably the better
 fit: airtime utilisation on a nearly-idle network is a noisy signal, whereas
 "one client each" is unambiguous. It is reachable by nvram — but see
-`08-open-questions.md`, because it has not been exercised on hardware.
+`08-open-questions.md`: the value is vendor-confirmed, but how the daemon
+arbitrates when both balance modes are enabled has not been tested.
 
 ## Target order is the highest-leverage setting
 
@@ -96,3 +99,24 @@ any threshold adjustment.
 Two steers per 60-second window, then that client is left alone for 180
 seconds. This is what prevents ping-ponging. If you widen the trigger
 conditions and clients start oscillating, this is the brake.
+
+## Reading why a steer happened
+
+`bsd -l` prints a steering history with a reason code per attempt, expressed in
+the same flag bits as the policies:
+
+    Seq TimeStamp STA_MAC           Fm_ch  To_ch  Reason     Description
+      1   1294922 aa:bb:cc:11:22:33 0xe06a 0xe23a 0x00000042 RSSI
+      7   1294994 aa:bb:cc:44:55:66 0x1003 0xe23a 0x00000040 load balance
+      8   1294997 aa:bb:cc:44:55:66 0x1003 0xe23a 0x00010000 steer succ
+
+    0x00000002  RSSI          0x00000040  LOAD_BAL
+    0x00000042  both          0x00010000  succeeded    0x00020000  failed
+
+This is considerably more informative than the syslog `bsd:` lines, which show
+only the 802.11v request and the station's response. Here you see which policy
+condition fired, and whether the station complied.
+
+Pair it with `bsd -s`, which lists each station's `DUALBAND` and `VHT`
+capabilities — so you can tell whether a device is being ignored by policy or is
+simply incapable of moving. See `09-diagnostics.md`.

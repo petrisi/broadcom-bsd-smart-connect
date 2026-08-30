@@ -1,13 +1,41 @@
-# How to reproduce this
+# How to reproduce and verify this
 
-Everything in `04-flag-bits.md` can be re-derived on any Asuswrt router running
-`bsd`. You should, if you are relying on it — bit positions may differ between
-firmware builds, and this was verified on exactly one.
+## Start with the daemon's own output
 
-`tools/dump-flag-tables.sh` automates the whole sequence. What follows is what
-it does and why.
+Before any binary analysis:
 
-## 1. Get binutils onto the router
+    /usr/sbin/bsd -H     # the complete flag reference, from the vendor
+    /usr/sbin/bsd -i     # parsed config, every flag decoded into English
+
+`-H` prints the field layouts and every flag constant with its hex value. `-i`
+prints how the daemon actually interpreted your current configuration. Between
+them they answer most questions about the format directly, and they take
+seconds.
+
+Bound them anyway, and confirm the running daemon survived:
+
+    /usr/sbin/bsd -i > /tmp/bsd_i.txt 2>&1 &
+    _p=$!; _n=0
+    while kill -0 $_p 2>/dev/null && [ $_n -lt 8 ]; do sleep 1; _n=$((_n+1)); done
+    kill -9 $_p 2>/dev/null
+    pidof bsd
+
+See `09-diagnostics.md` for what each option produces.
+
+**This section is deliberately first.** The binary-extraction method below was
+developed before those options were discovered, and produced exactly the same
+table — but it took hours rather than seconds. If you are verifying this
+repository against your own firmware, `bsd -H` is the fast path, and the
+extraction below is the independent check.
+
+---
+
+## Extracting the flag table from the binary
+
+Worth doing if you want to confirm the vendor output rather than trust it, or
+if you are working with a build whose `bsd` lacks these options.
+
+### 1. Get binutils onto the router
 
 Entware, on a USB stick. See the companion repository for setup.
 
@@ -15,10 +43,10 @@ Entware, on a USB stick. See the companion repository for setup.
     opkg update
     opkg install binutils
 
-You need `readelf` and `objdump`. The busybox `strings` will do, but it does
-not support `-t`, so offsets have to come from `readelf`.
+The busybox `strings` will do, but it does not support `-t`, so offsets have to
+come from `readelf`.
 
-## 2. Find the flag-name strings
+### 2. Find the flag-name strings
 
     readelf -p .rodata /usr/sbin/bsd | grep BSD_STEERING_POLICY_FLAG_
 
@@ -28,14 +56,15 @@ Offsets are **relative to the section**, so get its address:
 
 Absolute address = section address + offset.
 
-## 3. Find the value table
+### 3. Find the value table
 
 The names alone give you an ordering, and ordering is a tempting shortcut.
-**Do not trust it** — on this binary it is correct for one enum and wrong for
-two others.
+**It is wrong.** On this binary the string order matches the real values for
+one enum and diverges for two others — `CHAN_OVERSUB` is at bit 31, not bit 9,
+and the qualify enum skips two bits entirely.
 
-The real values live in a `{value, name}` pair table. Dump the writable data
-sections and search for words matching your computed string addresses:
+The real values live in a `{value, name}` pair table. Dump the data sections
+and search for words matching your computed string addresses:
 
     objdump -s -j .data       /usr/sbin/bsd
     objdump -s -j .data.rel.ro /usr/sbin/bsd
@@ -43,9 +72,7 @@ sections and search for words matching your computed string addresses:
 
 On the reference build the steering table sits at `0x40420` in `.data`.
 
-## 4. Read the word BEFORE each pointer
-
-This is the part that catches people, and it caught me.
+### 4. Read the word BEFORE each pointer
 
 The struct is `{value, name}` — the value **precedes** its name pointer:
 
@@ -58,42 +85,45 @@ Read the word *after* each pointer instead and you get a sequence that is
 internally consistent, plausible, and shifted by exactly one entry. Every value
 is wrong and nothing looks wrong.
 
-## 5. Verify against an anchor
+### 5. Verify against an anchor
 
-Never accept the table without an independent check. `LOAD_BAL` is the natural
-anchor because it can be confirmed two other ways:
+`LOAD_BAL` must land on `0x40`. It is independently confirmable: the GUI drives
+bit 6 from its "Enable Load Balance" control, and `bsd -i` prints
+`LOAD BALANCE: YES/NO` for that bit.
 
-- the GUI reads and writes bit 6 from its "Enable Load Balance" control
-  (`bsd_steering_policy_bin[i][6]` in `Advanced_Smart_Connect.asp`)
-- setting bit 6 on a live router produces an observable behavioural change
+If your table puts it anywhere else, the pair alignment is off by one.
 
-If your table puts `LOAD_BAL` anywhere other than bit 6, the alignment is off
-by one entry. Recheck step 4.
+`tools/dump-flag-tables.sh` automates steps 2–5.
 
-## 6. Other things worth pulling out of the binary
+---
 
-Debug format strings name struct fields in order, which is how the
-`bsd_sta_select_policy` weight vector was identified:
+## Other things the binary yields
 
-    strings /usr/sbin/bsd | grep -E "idle_rate|min_bw|Policy:"
+Debug format strings name struct fields in order:
 
-That gives you:
+    strings /usr/sbin/bsd | grep -E "idle_rate|min_bw|max=|Policy:"
 
-    Policy: idle_rate=%d rssi=%d phyrate_low=%d phyrate_high=%d wprio=%d
-            wrssi=%d wphy_rate=%d wtx_failures=%d wtx_rate=%d wrx_rate=%d
-            flags=0x%x
+That is how the `sta_select` weight vector and the undocumented third field of
+`bsd_if_qualify_policy` were identified, before `bsd -i` confirmed both.
 
-    bsd_if_qualify_policy min_bw[%d] flags[0x%x] rssi[%d]
+---
 
-Eleven fields and three fields respectively, matching the nvram layouts
-exactly. Also present are the internal default policy names —
-`bsd_2g5g_policy`, `bsd_5g2g_policy`, `bsd_5glo_2g_5ghi_policy` — selected by
-band layout.
+## What none of this tells you
 
-## What this approach cannot tell you
+Reading tables and help text gives you names, constants and layouts. It does
+**not** tell you how the daemon weighs one condition against another, how it
+arbitrates when two balance modes are enabled at once, or what the strategy
+presets behind `scheme` and `algo` actually do.
 
-Reading data tables gives you names and constants. It does **not** tell you how
-the daemon *uses* a flag — for that you need to disassemble the use sites and
-trace the bit tests, which is a substantially bigger job.
+Those need either behavioural testing or disassembly of the decision path. See
+`08-open-questions.md`.
 
-That gap is why `08-open-questions.md` exists.
+## A note on method
+
+The VHT flags were misread in an earlier revision of this repository. The name,
+the GUI source, and the stored values were all consistent with the wrong
+interpretation, and it survived several rounds of checking. What settled it was
+the daemon printing its own interpretation in English.
+
+Where a component can be made to explain itself, that beats inference — even
+careful inference against good evidence.
