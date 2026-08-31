@@ -131,7 +131,8 @@ Note this policy uses a **different flag enum** — see `04-flag-bits.md`.
     <window seconds> <count> <dwell seconds>
 
 Stock: `60 2 180` — two steers per 60-second window, then that station is left
-alone for 180 seconds.
+alone for 180 seconds. The dwell also throttles re-requests to a station that
+rejected, which is the practical reason to raise it — see `06-behaviour.md`.
 
 ---
 

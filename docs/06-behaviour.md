@@ -92,13 +92,74 @@ Before tuning thresholds, look at which radio is actually better:
 then make the better one the first target. That single change moves more than
 any threshold adjustment.
 
-## Bounce detection
+## Bounce detection — and what it actually gates
 
-    bsd_bounce_detect = "60 2 180"
+    bsd_bounce_detect = "<window sec> <count> <dwell sec>"
+    bsd_bounce_detect = "60 2 180"          # ASUS stock default
 
-Two steers per 60-second window, then that client is left alone for 180
-seconds. This is what prevents ping-ponging. If you widen the trigger
-conditions and clients start oscillating, this is the brake.
+Two steers per 60-second window, then that client is left alone for the dwell.
+This is the brake that stops ping-ponging: if you widen the trigger conditions
+and clients start oscillating, this is what you reach for.
+
+**The dwell also gates re-requests to a station that simply refused**, which is
+less obvious and matters more in practice. `bsd` has no separate give-up path
+for a station that rejects — it re-sends at the dwell interval, indefinitely.
+
+### Measured
+
+One station rejecting every request, over a single window:
+
+    BTM requests sent        76
+    responses rejecting      62 of 67   (status=1 x40, status=6 x22)
+    accepted                  5
+    worst station            26 attempts / 26 rejects  (100%)
+    inter-request gap        188-225 s, median 191     <- 180 s dwell + poll
+
+Raising the dwell to 1800 s and re-measuring over a clean six-hour window, with
+that station still associated to the same radio throughout:
+
+    act frames sent    ~47/hour  ->  0.33/hour
+    STA rejects        60        ->  0
+
+So the dwell is the retry throttle for a refusing station, not only an
+anti-oscillation guard. Stock `180` means a station that will never move is
+asked roughly every three minutes, forever.
+
+### Two failure modes that look identical in syslog
+
+    bsd: Sending act Frame to <MAC> with transition target eth7
+    bsd: BSS Transit Response: STA reject
+    bsd: Skip STA:<MAC> reject BSSID
+
+That sequence covers both a station that **refuses**, and one that **accepts,
+moves, then returns on its own** — the second produces the same repeating log
+with a shorter and far more erratic gap. Tell them apart by checking whether the
+station actually changed radio:
+
+    wlceventd: eth7: Auth <MAC> ... ReAssoc <MAC>
+    wlceventd: eth8: Disassoc <MAC>
+
+Present means it moved and came back: a genuine ping-pong, and bounce detect is
+exactly the right tool. Absent means it never moved, and you are watching futile
+retries. Measuring the gap distribution separates them quickly — a rejecting
+station clusters tightly on the dwell, a bouncing one scatters.
+
+### If the dwell is not enough
+
+`bsd` honours a static maclist of stations that are not steerable:
+
+    sta[...] not steerable match w/ static maclist. Skipped.
+
+On Asuswrt this is fed by `sta_binding_list` — per-client band binding, exposed
+on the ACL page. That is the surgical fix for one or two stations that will
+never move, and it leaves steering intact for everything else.
+
+Note also that `bsd_check_steer_fail` exists in the binary and emits
+
+    STA <MAC> Steering failed %d times on ifidx [%d]
+
+which never reaches syslog because `bsd_msglevel` is unset by default. Raise it
+if you want to see whether that internal counter escalates or simply resets.
 
 ## Reading why a steer happened
 

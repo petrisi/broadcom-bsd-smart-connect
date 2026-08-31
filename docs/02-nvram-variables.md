@@ -64,6 +64,11 @@ default addresses from a network the router has never been on.
 `60 2 180` means: if a station is steered twice within 60 seconds, leave it
 alone for the next 180. This is what stops clients ping-ponging between bands.
 
+The dwell **also** gates re-requests to a station that merely *rejected* the
+transition — `bsd` has no separate give-up path, so a station that will never
+move is re-asked every dwell interval indefinitely. Measured before/after in
+`06-behaviour.md`.
+
 ## Applying changes
 
 Writing nvram changes nothing on its own — `bsd` reads its configuration at
